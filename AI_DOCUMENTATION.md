@@ -21,22 +21,54 @@ HealthPulse AI is designed exclusively as an **administrative healthcare assista
 
 ---
 
-## 2. LangGraph Stateful Agent Architecture
+## 2. LangGraph Stateful Agent & Real LLM NLU Architecture
 
 The agent is implemented using **LangGraph** (`langgraph.graph.StateGraph`), transitioning through deterministic and conditional nodes:
 
 ```mermaid
 flowchart TD
-    Start([User Message]) --> SafetyNode[safety_check_node]
+    Start([User Message]) --> SafetyNode[safety_check_node: Deterministic Guardrail]
     SafetyNode --> ShouldEscalate{Emergency / Acute Symptoms?}
     
     ShouldEscalate -->|Yes| EscalateNode[capability_execution_node: transfer_to_human]
-    ShouldEscalate -->|No| IntentNode[intent_recognition_node]
+    ShouldEscalate -->|No| IntentNode[intent_recognition_node: LLM / NLU Engine]
     
-    IntentNode --> CapabilityNode[capability_execution_node]
+    IntentNode --> NeedsClarification{Clarification Needed?}
+    NeedsClarification -->|Yes| ClarificationReply[Return Clarification Question]
+    NeedsClarification -->|No| CapabilityNode[capability_execution_node: AICapabilities Boundary]
+    
     EscalateNode --> End([Return Safe Response])
+    ClarificationReply --> End
     CapabilityNode --> End
 ```
+
+### LLM NLU Providers & Multi-Model Support:
+- **Anthropic Claude** (e.g. `claude-3-5-sonnet-20241022`) via native Messages API.
+- **OpenAI GPT** (e.g. `gpt-4o-mini`, `gpt-4o`) via JSON-mode Chat Completions.
+- **Google Gemini** (e.g. `gemini-1.5-pro`) via generateContent JSON mode.
+- **Structured Deterministic Fallback**: Automatic offline fallback with zero external dependencies when API keys are not supplied.
+
+### Structured NLU Output Schema:
+```json
+{
+  "intent": "FIND_HOSPITAL" | "FIND_DOCTOR" | "BOOK_APPOINTMENT" | "RESCHEDULE_APPOINTMENT" | "CANCEL_APPOINTMENT" | "CHECK_APPOINTMENT" | "QUESTIONNAIRE" | "CLARIFICATION_NEEDED" | "GENERAL_ADMINISTRATIVE_QUERY" | "HUMAN_ESCALATION",
+  "specialty": "Orthopedics | Dermatology | General Medicine | Pediatrics | null",
+  "doctor_name": "string | null",
+  "target_date": "YYYY-MM-DD | null",
+  "time_slot": "HH:MM | null",
+  "clarification_question": "string | null",
+  "confidence": 0.95
+}
+```
+
+### Deterministic Safety Guardrail Backstop (PRD §10):
+Before the LLM is even invoked, `safety_check_node` executes deterministic keyword matching against critical clinical emergency symptoms (e.g., *chest pain, shortness of breath, severe bleeding, loss of consciousness*). If triggered:
+1. The turn is immediately routed to human transfer (`transfer_to_human`).
+2. Immediate emergency hotline instructions (108 / nearest ER) are returned.
+3. No LLM generation can override or hallucinate away this deterministic emergency escalation.
+
+### Clarification Over Guessing (PRD §9/§10):
+When a patient provides ambiguous or underspecified requests (such as *"Can you book an appointment for me?"* without a doctor or specialty), the agent does not guess. The NLU layer sets `intent="CLARIFICATION_NEEDED"` and returns an empathetic clarification question prompting for the desired doctor or specialty.
 
 ### Agent State Schema:
 ```python
@@ -47,6 +79,7 @@ class AgentState(TypedDict):
     hospital_id: Optional[int]
     context: Dict[str, Any]
     intent: str
+    extracted_slots: Optional[Dict[str, Any]]
     capabilities_called: List[str]
     slots_suggested: List[Dict[str, Any]]
     appointment_data: Optional[Dict[str, Any]]

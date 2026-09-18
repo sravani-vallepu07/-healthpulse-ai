@@ -8,6 +8,7 @@ from langgraph.graph import StateGraph, END
 from app.ai.prompts import HEALTHCARE_ADMIN_SYSTEM_PROMPT, EMERGENCY_ESCALATION_MESSAGE
 from app.ai.capabilities import AICapabilities
 from app.ai.context import get_context_data, update_context_data
+from app.ai.llm_client import extract_intent_and_slots, parse_relative_date, parse_time_slot
 from app.models.appointment import Appointment
 
 class AgentState(TypedDict):
@@ -17,6 +18,7 @@ class AgentState(TypedDict):
     hospital_id: Optional[int]
     context: Dict[str, Any]
     intent: str
+    extracted_slots: Optional[Dict[str, Any]]
     capabilities_called: List[str]
     slots_suggested: List[Dict[str, Any]]
     appointment_data: Optional[Dict[str, Any]]
@@ -25,48 +27,7 @@ class AgentState(TypedDict):
     correlation_id: str
 
 def parse_target_date(text: str) -> str:
-    lower = text.lower()
-    today = datetime.utcnow()
-    if "tomorrow" in lower:
-        return (today + timedelta(days=1)).strftime("%Y-%m-%d")
-    if "friday" in lower:
-        days_ahead = 4 - today.weekday()
-        if days_ahead <= 0:
-            days_ahead += 7
-        return (today + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
-    if "wednesday" in lower:
-        days_ahead = 2 - today.weekday()
-        if days_ahead <= 0:
-            days_ahead += 7
-        return (today + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
-    if "monday" in lower:
-        days_ahead = 0 - today.weekday()
-        if days_ahead <= 0:
-            days_ahead += 7
-        return (today + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
-    # check for YYYY-MM-DD
-    match = re.search(r"\d{4}-\d{2}-\d{2}", text)
-    if match:
-        return match.group(0)
-    return today.strftime("%Y-%m-%d")
-
-def parse_time_slot(text: str) -> Optional[str]:
-    match = re.search(r"(\d{1,2}:\d{2})", text)
-    if match:
-        t = match.group(1)
-        if len(t.split(":")[0]) == 1:
-            t = f"0{t}"
-        return t
-    match_am_pm = re.search(r"(\d{1,2})\s*(am|pm)", text, re.IGNORECASE)
-    if match_am_pm:
-        hour = int(match_am_pm.group(1))
-        period = match_am_pm.group(2).lower()
-        if period == "pm" and hour < 12:
-            hour += 12
-        elif period == "am" and hour == 12:
-            hour = 0
-        return f"{hour:02d}:00"
-    return None
+    return parse_relative_date(text)
 
 def safety_check_node(state: AgentState) -> AgentState:
     text = state["message"].lower()
@@ -87,32 +48,18 @@ def should_escalate(state: AgentState) -> str:
     return "proceed"
 
 def intent_recognition_node(state: AgentState) -> AgentState:
-    text = state["message"].lower()
-    
-    if any(w in text for w in ["cancel", "drop my appointment", "stop my appointment"]):
-        state["intent"] = "CANCEL_APPOINTMENT"
-    elif any(w in text for w in ["reschedule", "move my appointment", "change appointment time", "postpone"]):
-        state["intent"] = "RESCHEDULE_APPOINTMENT"
-    elif any(w in text for w in ["questionnaire", "pre-visit", "form", "survey"]):
-        state["intent"] = "QUESTIONNAIRE"
-    elif any(w in text for w in ["check appointment", "my appointments", "status of appointment", "upcoming"]):
-        state["intent"] = "CHECK_APPOINTMENT"
-    elif any(w in text for w in ["book", "reserve", "schedule", "take slot", "am", "pm", ":00", ":30"]):
-        # Check if user is picking a slot
-        if parse_time_slot(text) or "book" in text:
-            state["intent"] = "BOOK_APPOINTMENT"
-        else:
-            state["intent"] = "FIND_DOCTOR"
-    elif any(w in text for w in ["doctor", "specialist", "orthopedic", "ortho", "dermatology", "physician", "rao", "priya", "kiran", "cardiologist"]):
-        state["intent"] = "FIND_DOCTOR"
-    elif any(w in text for w in ["hospital", "clinic", "center", "centre", "abc", "xyz"]):
-        state["intent"] = "FIND_HOSPITAL"
-    elif any(w in text for w in ["friday", "tomorrow", "wednesday", "next week", "make that"]):
-        # Contextual date shift
-        state["intent"] = "FIND_DOCTOR"
-    else:
-        state["intent"] = "GENERAL_ADMINISTRATIVE_QUERY"
-
+    nlu_result = extract_intent_and_slots(state["message"], state.get("context") or {})
+    state["intent"] = nlu_result.intent
+    state["extracted_slots"] = {
+        "specialty": nlu_result.specialty,
+        "doctor_name": nlu_result.doctor_name,
+        "target_date": nlu_result.target_date,
+        "time_slot": nlu_result.time_slot,
+        "clarification_question": nlu_result.clarification_question,
+        "confidence": nlu_result.confidence
+    }
+    if nlu_result.intent == "CLARIFICATION_NEEDED" and nlu_result.clarification_question:
+        state["reply"] = nlu_result.clarification_question
     return state
 
 def build_agent_graph(db: Session):
@@ -123,11 +70,18 @@ def build_agent_graph(db: Session):
         intent = state["intent"]
         msg = state["message"]
         ctx = state["context"]
+        slots = state.get("extracted_slots") or {}
         caps_called = list(state["capabilities_called"])
 
         if intent == "HUMAN_ESCALATION":
             tools.transfer_to_human(reason="Emergency symptom detected in patient prompt", urgency="CRITICAL")
             caps_called.append("transfer_to_human")
+            state["capabilities_called"] = caps_called
+            return state
+
+        if intent == "CLARIFICATION_NEEDED":
+            if not state.get("reply"):
+                state["reply"] = slots.get("clarification_question") or "Could you please clarify your request?"
             state["capabilities_called"] = caps_called
             return state
 
@@ -141,19 +95,21 @@ def build_agent_graph(db: Session):
                 state["reply"] = "Currently no hospitals are approved for booking in this region."
 
         elif intent == "FIND_DOCTOR":
-            # Extract specialty or name
-            spec = None
-            if "ortho" in msg.lower():
-                spec = "Orthopedics"
-            elif "derma" in msg.lower():
-                spec = "Dermatology"
-            elif "general" in msg.lower() or "physician" in msg.lower() or "fever" in msg.lower():
-                spec = "General Medicine"
+            # Extract specialty or name from structured slots or message
+            spec = slots.get("specialty")
+            if not spec:
+                if "ortho" in msg.lower():
+                    spec = "Orthopedics"
+                elif "derma" in msg.lower():
+                    spec = "Dermatology"
+                elif "general" in msg.lower() or "physician" in msg.lower() or "fever" in msg.lower():
+                    spec = "General Medicine"
 
-            doc_name = None
-            for n in ["Rao", "Priya", "Kiran"]:
-                if n.lower() in msg.lower():
-                    doc_name = n
+            doc_name = slots.get("doctor_name")
+            if not doc_name:
+                for n in ["Rao", "Priya", "Kiran"]:
+                    if n.lower() in msg.lower():
+                        doc_name = n
 
             # Search doctors
             doctors = tools.search_doctors(specialty=spec, name=doc_name, hospital_id=state["hospital_id"])
@@ -165,7 +121,7 @@ def build_agent_graph(db: Session):
                 ctx["selected_hospital_id"] = selected_doc["hospital_id"]
 
                 # Check real availability
-                target_date = parse_target_date(msg)
+                target_date = slots.get("target_date") or parse_target_date(msg)
                 ctx["selected_date"] = target_date
                 
                 slots = tools.check_availability(
@@ -190,11 +146,11 @@ def build_agent_graph(db: Session):
                 state["reply"] = "I can help you find an appointment. We have specialists in Orthopedics, General Medicine, and Dermatology. Which specialty do you need?"
 
         elif intent == "BOOK_APPOINTMENT":
-            # Attempt to book slot
-            slot_time = parse_time_slot(msg)
+            # Attempt to book slot using extracted slots or text fallback
+            slot_time = slots.get("time_slot") or parse_time_slot(msg)
             doc_id = ctx.get("selected_doctor_id")
             hosp_id = ctx.get("selected_hospital_id")
-            target_date = ctx.get("selected_date") or parse_target_date(msg)
+            target_date = slots.get("target_date") or ctx.get("selected_date") or parse_target_date(msg)
 
             # If user didn't specify doctor yet, try to find default or ask
             if not doc_id:

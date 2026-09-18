@@ -2,6 +2,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, Tuple
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 from fastapi import HTTPException, status
 
 from app.models.appointment import Appointment, AppointmentStatus, ExternalMapping, AppointmentStateHistory, can_transition_appointment
@@ -67,7 +68,18 @@ def create_appointment_with_verification(
         reason=reason or "General Consultation"
     )
     db.add(appointment)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error_code": "SLOT_CONFLICT",
+                "message": "The selected slot was just booked by a concurrent transaction.",
+                "correlation_id": corr_id
+            }
+        )
     db.refresh(appointment)
 
     # Record Initial State History

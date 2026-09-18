@@ -1,6 +1,6 @@
 import enum
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, DateTime, Enum, ForeignKey, Text, UniqueConstraint
+from sqlalchemy import Column, Integer, String, DateTime, Enum, ForeignKey, Text, UniqueConstraint, Index, text
 from sqlalchemy.orm import relationship
 from app.database import Base
 
@@ -18,6 +18,15 @@ class AppointmentStatus(str, enum.Enum):
 
 class Appointment(Base):
     __tablename__ = "appointments"
+    __table_args__ = (
+        Index(
+            "uq_doctor_active_slot",
+            "doctor_id", "date", "start_time",
+            unique=True,
+            sqlite_where=text("status NOT IN ('CANCELLED', 'FAILED')"),
+            postgresql_where=text("status NOT IN ('CANCELLED', 'FAILED')")
+        ),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     hospital_id = Column(Integer, ForeignKey("hospitals.id", ondelete="CASCADE"), nullable=False, index=True)

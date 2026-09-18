@@ -18,7 +18,8 @@ from app.routers import (
     integration_routes,
     workflow_routes,
     audit_routes,
-    ops_routes
+    ops_routes,
+    telephony_routes
 )
 
 # Initialize database schema
@@ -88,6 +89,7 @@ app.include_router(integration_routes.router, prefix=settings.API_V1_STR)
 app.include_router(workflow_routes.router, prefix=settings.API_V1_STR)
 app.include_router(audit_routes.router, prefix=settings.API_V1_STR)
 app.include_router(ops_routes.router, prefix=settings.API_V1_STR)
+app.include_router(telephony_routes.router, prefix=settings.API_V1_STR)
 
 @app.get("/health")
 def health_check():

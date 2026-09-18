@@ -1,4 +1,4 @@
-﻿import sqlite3
+import sqlite3
 import os
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'healthcare_platform.db')
@@ -40,6 +40,15 @@ def run_migration():
         cursor.execute('CREATE INDEX ix_ash_appointment_id ON appointment_state_history (appointment_id)')
         cursor.execute('CREATE INDEX ix_ash_correlation_id ON appointment_state_history (correlation_id)')
         changes.append('CREATE TABLE appointment_state_history')
+
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='index' AND name='uq_doctor_active_slot'")
+    if not cursor.fetchone():
+        cursor.execute('''
+            CREATE UNIQUE INDEX uq_doctor_active_slot 
+            ON appointments (doctor_id, date, start_time) 
+            WHERE status NOT IN ('CANCELLED', 'FAILED')
+        ''')
+        changes.append('CREATE UNIQUE INDEX uq_doctor_active_slot')
 
     conn.commit()
     conn.close()

@@ -223,3 +223,91 @@ sequenceDiagram
     Appt->>Audit: Log IntegrationVerification (status=VERIFIED)
     Appt-->>Admin: Observable in Audit Trail as Successful Recovery
 ```
+
+---
+
+## 7. Voice & Telephony Architecture (PRD §11)
+
+HealthPulse AI includes an enterprise-grade, pluggable telephony layer designed to accept inbound telephone calls, resolve patient identity by caller ID, stream conversational audio to the AI state machine, synthesize speech, and handle network disconnects.
+
+```mermaid
+flowchart TD
+    subgraph InboundCall ["Inbound Phone Call Event"]
+        PSTN["Inbound Telephone Caller (+91 9848022338)"]
+        TwilioGateway["Twilio Voice / SIP Trunk"]
+        MockGateway["MockTelephonyConnector"]
+    end
+
+    subgraph TelephonyBridge ["Telephony Integration Bridge"]
+        InboundAPI["POST /api/telephony/inbound"]
+        PatientLookup["Caller ID Patient Resolver"]
+        StreamAPI["POST /api/telephony/stream"]
+        STTBridge["Speech-to-Text Pipeline"]
+        TTSBridge["Text-to-Speech Synthesis"]
+        DisconnectAPI["POST /api/telephony/disconnect"]
+    end
+
+    subgraph AIWorkflow ["AI Conversational Engine"]
+        AgentEngine["run_ai_agent(patient_id, conv_id)"]
+        Guardrail["Clinical Safety Check"]
+        Caps["AICapabilities"]
+    end
+
+    PSTN --> TwilioGateway
+    TwilioGateway --> InboundAPI
+    MockGateway --> InboundAPI
+    InboundAPI --> PatientLookup
+    PatientLookup --> StreamAPI
+    StreamAPI --> STTBridge
+    STTBridge --> AgentEngine
+    AgentEngine --> Guardrail
+    Guardrail --> Caps
+    AgentEngine --> TTSBridge
+    TTSBridge --> PSTN
+    PSTN -.->|Network Drop / Disconnect| DisconnectAPI
+```
+
+### Inbound Phone Call & Failure Handling Sequence
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Caller as Inbound Telephone Caller
+    participant Gateway as Telephony Gateway (Twilio / Mock)
+    participant Telephony as Telephony Connector
+    participant PatientDB as Patient Directory
+    participant AI as LangGraph run_ai_agent
+    participant Audit as Audit Service
+
+    Caller->>Gateway: Dials Hospital Inbound Number (+91 866 247 1111)
+    Gateway->>Telephony: initiate_inbound_call(caller_phone)
+    Telephony->>PatientDB: Lookup patient by phone number
+    PatientDB-->>Telephony: Match: Ramesh Varma (ID: 1)
+    Telephony->>Telephony: Create active Call Session (CALL-9848A)
+    Telephony-->>Caller: "Hello Ramesh! Thank you for calling HealthPulse AI..."
+    
+    loop Conversational Turns
+        Caller->>Gateway: Speaks: "I need Dr. Anil Rao on Friday"
+        Gateway->>Telephony: process_audio_stream(call_id, speech_transcript)
+        Telephony->>AI: run_ai_agent(message, patient_id=1)
+        AI-->>Telephony: reply, suggested_slots, intent=FIND_DOCTOR
+        Telephony->>Telephony: Synthesize audio response WAV
+        Telephony-->>Caller: Plays back speech reply
+    end
+
+    alt Emergency Symptom Escalation
+        Caller->>Gateway: "I have acute chest pain and dizziness"
+        Gateway->>Telephony: process_audio_stream(call_id, transcript)
+        Telephony->>AI: run_ai_agent()
+        AI-->>Telephony: intent=HUMAN_ESCALATION, is_escalated=True
+        Telephony->>Telephony: Mark session = ESCALATED_TO_HUMAN
+        Telephony->>Audit: Log emergency transfer event
+        Telephony-->>Caller: Immediate ER hotline transfer (108 / ER)
+    else Abnormal Network Drop (PRD §11)
+        Caller-xGateway: Unexpected Carrier Disconnect
+        Gateway->>Telephony: handle_call_disconnect(reason=NETWORK_DROP)
+        Telephony->>Telephony: Mark session = FAILED (failure_reason=NETWORK_DROP)
+        Telephony->>Audit: Log TELEPHONY_CALL_FAILURE
+    end
+```
+

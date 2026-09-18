@@ -76,10 +76,17 @@ def list_questionnaires(
     return results
 
 @router.get("/{questionnaire_id}")
-def get_questionnaire(questionnaire_id: int, db: Session = Depends(get_db)):
+def get_questionnaire(
+    questionnaire_id: int,
+    db: Session = Depends(get_db),
+    user: Optional[User] = Depends(require_current_user)
+):
     q = db.query(Questionnaire).filter(Questionnaire.id == questionnaire_id).first()
     if not q:
         raise HTTPException(status_code=404, detail={"error_code": "NOT_FOUND", "message": "Questionnaire not found"})
+
+    if user and user.role == Role.HOSPITAL_ADMIN:
+        verify_tenant_access(user, q.hospital_id)
 
     return {
         "id": q.id,
@@ -94,6 +101,29 @@ def get_questionnaire(questionnaire_id: int, db: Session = Depends(get_db)):
             "order": qu.order
         } for qu in sorted(q.questions, key=lambda x: x.order)]
     }
+
+@router.put("/{questionnaire_id}")
+def update_questionnaire(
+    questionnaire_id: int,
+    payload: QuestionnaireCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles([Role.PLATFORM_ADMIN, Role.HOSPITAL_ADMIN]))
+):
+    q = db.query(Questionnaire).filter(Questionnaire.id == questionnaire_id).first()
+    if not q:
+        raise HTTPException(status_code=404, detail={"error_code": "NOT_FOUND", "message": "Questionnaire not found"})
+
+    verify_tenant_access(user, q.hospital_id)
+    verify_tenant_access(user, payload.hospital_id)
+
+    q.name = payload.name
+    q.hospital_id = payload.hospital_id
+    q.specialty_id = payload.specialty_id
+    q.doctor_id = payload.doctor_id
+    q.appointment_type = payload.appointment_type
+    db.commit()
+    db.refresh(q)
+    return {"success": True, "questionnaire_id": q.id, "name": q.name}
 
 @router.post("/{questionnaire_id}/responses")
 def submit_questionnaire_response(
@@ -150,6 +180,8 @@ def get_appointment_responses(
         raise HTTPException(status_code=403, detail={"error_code": "FORBIDDEN", "message": "Access denied"})
     elif user.role == Role.PATIENT and (not user.patient_profile or user.patient_profile.id != appointment.patient_id):
         raise HTTPException(status_code=403, detail={"error_code": "FORBIDDEN", "message": "Access denied"})
+    elif user.role == Role.HOSPITAL_ADMIN:
+        verify_tenant_access(user, appointment.hospital_id)
 
     responses = db.query(QuestionnaireResponse).filter(
         QuestionnaireResponse.appointment_id == appointment_id

@@ -1,4 +1,4 @@
-﻿"""
+"""
 AI Evaluation Benchmark Suite
 Tests the LangGraph AI agent across 14 evaluation scenarios.
 Each test verifies: correct intent detection, proper capability calls,
@@ -213,3 +213,109 @@ def test_eval_context_retention_date_shift():
             "Doctor context overwritten during date shift — context retention bug!"
     finally:
         db.close()
+
+
+def test_eval_ambiguous_input_triggers_clarification():
+    """Eval-15: Ambiguous booking input triggers clarification question without guessing (PRD §9/§10)."""
+    state = _make_state("I would like to book an appointment please")
+    result = intent_recognition_node(state)
+    assert result["intent"] == "CLARIFICATION_NEEDED"
+    assert result.get("extracted_slots", {}).get("clarification_question") is not None
+    assert "doctor" in result["reply"].lower() or "specialty" in result["reply"].lower()
+
+
+def test_eval_paraphrased_clinical_phrasing():
+    """Eval-16: Paraphrased non-keyword clinical vocabulary correctly maps to specialty."""
+    state1 = _make_state("My knee joint is hurting severely after a sports injury, who can check my bones?")
+    result1 = intent_recognition_node(state1)
+    assert result1["intent"] == "FIND_DOCTOR"
+    assert result1.get("extracted_slots", {}).get("specialty") == "Orthopedics"
+
+    state2 = _make_state("I have an inflamed skin rash on my cheeks with severe itching")
+    result2 = intent_recognition_node(state2)
+    assert result2["intent"] == "FIND_DOCTOR"
+    assert result2.get("extracted_slots", {}).get("specialty") == "Dermatology"
+
+
+def test_eval_multiturn_clarification_to_resolution():
+    """Eval-17: Ambiguous prompt triggers clarification, follow-up turn resolves to booking availability."""
+    db = SessionLocal()
+    try:
+        patient = db.query(Patient).first()
+        if not patient:
+            pytest.skip("No patients in DB")
+
+        app = build_agent_graph(db)
+
+        # Turn 1: Ambiguous booking intent
+        state1: AgentState = {
+            "message": "Can you book an appointment for me?",
+            "patient_id": patient.id,
+            "conversation_id": 99992,
+            "hospital_id": None,
+            "context": {},
+            "intent": "GENERAL_ADMINISTRATIVE_QUERY",
+            "capabilities_called": [],
+            "slots_suggested": [],
+            "appointment_data": None,
+            "reply": "",
+            "is_escalated": False,
+            "correlation_id": "EVAL-AMBIG-001"
+        }
+        res1 = app.invoke(state1)
+        assert res1["intent"] == "CLARIFICATION_NEEDED"
+        assert "specialty" in res1["reply"].lower() or "doctor" in res1["reply"].lower()
+
+        # Turn 2: Patient clarifies specialty
+        state2: AgentState = {
+            "message": "I need Dr. Anil Rao for orthopedic care",
+            "patient_id": patient.id,
+            "conversation_id": 99992,
+            "hospital_id": None,
+            "context": dict(res1["context"]),
+            "intent": "GENERAL_ADMINISTRATIVE_QUERY",
+            "capabilities_called": [],
+            "slots_suggested": [],
+            "appointment_data": None,
+            "reply": "",
+            "is_escalated": False,
+            "correlation_id": "EVAL-AMBIG-002"
+        }
+        res2 = app.invoke(state2)
+        assert res2["intent"] == "FIND_DOCTOR"
+        assert "check_availability" in res2["capabilities_called"]
+        assert len(res2["slots_suggested"]) > 0
+    finally:
+        db.close()
+
+
+def test_eval_llm_json_extraction_mocked(monkeypatch):
+    """Eval-18: Verifies real LLM caller (Anthropic & OpenAI) parses structured JSON."""
+    from app.ai.llm_client import call_anthropic_nlu, call_openai_nlu
+    import httpx
+
+    fake_openai_json = {
+        "choices": [{
+            "message": {
+                "content": '{"intent": "FIND_DOCTOR", "specialty": "Orthopedics", "doctor_name": "Dr. Anil Rao", "target_date": "2026-10-15", "time_slot": "10:00", "clarification_question": null, "confidence": 0.98}'
+            }
+        }]
+    }
+
+    class FakeResponse:
+        status_code = 200
+        def json(self):
+            return fake_openai_json
+
+    def mock_post(*args, **kwargs):
+        return FakeResponse()
+
+    monkeypatch.setattr(httpx.Client, "post", mock_post)
+
+    parsed = call_openai_nlu("Book Dr Rao on 2026-10-15 at 10am", {}, api_key="fake-test-key")
+    assert parsed is not None
+    assert parsed.intent == "FIND_DOCTOR"
+    assert parsed.doctor_name == "Dr. Anil Rao"
+    assert parsed.specialty == "Orthopedics"
+    assert parsed.time_slot == "10:00"
+

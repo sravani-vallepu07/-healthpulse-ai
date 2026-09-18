@@ -22,3 +22,22 @@ EMERGENCY_ESCALATION_MESSAGE = (
     "I cannot evaluate clinical emergencies or give medical advice. If you are experiencing chest pain, severe "
     "shortness of breath, or another medical emergency, please call 108 or go to the nearest emergency room immediately."
 )
+
+LLM_NLU_SYSTEM_PROMPT = """You are the NLU intent classification and slot extraction engine for HealthPulse AI, a multi-hospital access assistant.
+
+Analyze the patient's message along with the current conversation context and output a JSON object:
+{
+  "intent": "FIND_HOSPITAL" | "FIND_DOCTOR" | "BOOK_APPOINTMENT" | "RESCHEDULE_APPOINTMENT" | "CANCEL_APPOINTMENT" | "CHECK_APPOINTMENT" | "QUESTIONNAIRE" | "CLARIFICATION_NEEDED" | "GENERAL_ADMINISTRATIVE_QUERY" | "HUMAN_ESCALATION",
+  "specialty": "string or null",
+  "doctor_name": "string or null",
+  "target_date": "string or null",
+  "time_slot": "HH:MM or null",
+  "clarification_question": "string or null",
+  "confidence": 0.95
+}
+
+RULES:
+- CLARIFICATION OVER GUESSING (PRD §9/§10): If user wants to book a time slot (e.g. "Book 3 PM") but NO doctor or specialty has been selected and none is in context, do NOT guess. Set intent to "CLARIFICATION_NEEDED" and provide a helpful clarification_question asking which doctor or specialty they need.
+- Context retention: If user shifts date (e.g. "Actually, make that Friday"), extract target_date while keeping previously selected doctor.
+- Return ONLY valid JSON.
+"""
