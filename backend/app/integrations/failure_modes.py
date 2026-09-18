@@ -1,0 +1,11 @@
+import enum
+
+class FailureMode(str, enum.Enum):
+    NONE = "NONE"
+    TIMEOUT = "TIMEOUT"
+    NETWORK_ERROR = "NETWORK_ERROR"
+    AUTH_ERROR = "AUTH_ERROR"
+    VALIDATION_ERROR = "VALIDATION_ERROR"
+    SLOT_CONFLICT = "SLOT_CONFLICT"
+    FAIL = "FAIL"
+

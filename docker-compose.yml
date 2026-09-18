@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: healthpulse_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-healthpulse_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-healthpulse_secure_password}
+      POSTGRES_DB: ${POSTGRES_DB:-healthpulse_db}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-healthpulse_user} -d ${POSTGRES_DB:-healthpulse_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: healthpulse_backend
+    restart: always
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-healthpulse_user}:${POSTGRES_PASSWORD:-healthpulse_secure_password}@db:5432/${POSTGRES_DB:-healthpulse_db}
+      - JWT_SECRET=${JWT_SECRET:-default-dev-jwt-secret-change-in-prod}
+      - LLM_PROVIDER=${LLM_PROVIDER:-structured_agent}
+      - VOICE_PROVIDER=${VOICE_PROVIDER:-browser}
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: healthpulse_frontend
+    restart: always
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
